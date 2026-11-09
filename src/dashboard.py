@@ -3203,7 +3203,7 @@ def normalize_tailscale_status(data):
             "selected_ip": next((ip.split("/")[0] for ip in (exit_status.get("TailscaleIPs") or (selected or {}).get("TailscaleIPs") or []) if ":" not in ip), "")}
 
 
-def get_tailscale_status():
+def _get_tailscale_status():
     try:
         result = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=3)
         if result.stdout.strip():
@@ -3218,6 +3218,36 @@ def get_tailscale_status():
         return {"state": "Unavailable", "updated": time.time()}
 
 
+def get_tailscale_status():
+    status = _get_tailscale_status()
+    configured = uci_get("tailscale.settings.run_exit_node")
+    status["run_exit_node"] = {"1": "On", "0": "Off"}.get(configured, "Unknown")
+    return status
+
+
+def set_tailscale_run_exit(enable):
+    module = "/usr/lib/oui-httpd/rpc/tailscale"
+    ok, cfg = gl_lua_rpc(module, "get_config", {}, timeout=8)
+    if not ok or not isinstance(cfg, dict) or "run_exit_node" not in cfg:
+        return "Cannot read Tailscale settings"
+    if enable:
+        if not cfg.get("enabled") or get_tailscale_status().get("backend") != "Running":
+            return "Enable / sign in via web UI"
+        if cfg.get("exit_node_ip") or get_tailscale_status().get("selected_ip"):
+            return "Select None in EXIT NODE first"
+    if bool(cfg["run_exit_node"]) == enable:
+        return "Already configured"
+    params = {k: bool(cfg.get(k)) for k in ("enabled", "lan_enabled", "wan_enabled", "masq")}
+    params.update(run_exit_node=enable, exit_node_ip=cfg.get("exit_node_ip") or "")
+    ok, result = gl_lua_rpc(module, "set_config", params, timeout=45)
+    if not ok or (isinstance(result, dict) and result.get("err_code")):
+        return "Apply failed; check web settings"
+    if uci_get("tailscale.settings.run_exit_node") != ("1" if enable else "0"):
+        return "Setting was not saved"
+    return ("Saved On; approve in Tailscale admin" if enable
+            else "Saved Off; Tailscale reconnecting")
+
+
 def panel_tailscale(status, conn_type=None, cell_signal=None):
     img, d = new_canvas()
     accent = (110, 195, 230)
@@ -3230,14 +3260,15 @@ def panel_tailscale(status, conn_type=None, cell_signal=None):
     state = status["state"] + (" (stale)" if stale else "")
     d.text((30, 41), state, font=font("default_bold", 17), fill=color)
     rows = [("DEVICE", status.get("node", "--")), ("TAILSCALE IP", status.get("ip", "--")),
-            ("EXIT NODE  >", status.get("exit", "--")), ("PEERS", status.get("peers", "--"))]
+            ("EXIT NODE  >", status.get("exit", "--")), ("PEERS", status.get("peers", "--")),
+            ("RUN AS EXIT NODE  >", status.get("run_exit_node", "Unknown"))]
     for index, (label, value) in enumerate(rows):
-        y = 74 + index * 49
-        d.rounded_rectangle([10, y, 230, y + 44], radius=7, fill=(22, 28, 40))
+        y = 70 + index * 40
+        d.rounded_rectangle([10, y, 230, y + 37], radius=7, fill=(22, 28, 40))
         d.text((18, y + 4), label, font=font("default_medium", 10), fill=DIM)
         f = font("default_cn_medium", 14)
         d.text((18, y + 19), truncate_to_width(d, str(value), f, 204), font=f, fill=FG)
-    note = f"{status.get('health', 0)} health alerts" if status.get("health") else "Tap EXIT NODE to select"
+    note = f"{status.get('health', 0)} health alerts" if status.get("health") else "Tap an exit setting to change"
     centered_text(d, W / 2, 277, note + (f" / {age}s old" if stale else ""), font("default_medium", 10), DIM)
     draw_page_dots(d, 4)
     return img
@@ -6708,7 +6739,21 @@ def mode_live():
                             zone = hit_main_monitor(down_x, down_y)
 
                         new_view = None
-                        if name == "tailscale" and 172 <= down_y <= 216:
+                        if name == "tailscale" and 230 <= down_y <= 267:
+                            current = uci_get("tailscale.settings.run_exit_node")
+                            if current not in ("0", "1"):
+                                show_notice("Cannot read exit-node setting")
+                            else:
+                                ts_pending_run_exit = current != "1"
+                                confirm_title = "Run as exit node"
+                                confirm_message = ("Advertise this router as an exit node? Approve it in Tailscale admin. Connection may restart."
+                                                   if ts_pending_run_exit else "Stop offering this router as an exit node? Connected clients may lose internet.")
+                                confirm_yes_label = "Enable" if ts_pending_run_exit else "Disable"
+                                confirm_action = "tailscale_run_exit"
+                                confirm_return_view = "main"
+                                confirm_danger = not ts_pending_run_exit
+                                new_view = "confirm"
+                        elif name == "tailscale" and 150 <= down_y <= 187:
                             ts_picker_status = run_with_spinner(cur_img, "Loading nodes...", get_tailscale_status) or {}
                             ts_picker_status["selected_ip"] = uci_get("tailscale.settings.exit_node_ip")
                             picker_scroll_base = 0
@@ -7073,9 +7118,10 @@ def mode_live():
                         cur_img = render_main(panel_idx)
                         write_frame(cur_img)
                         last_draw = time.time()
-                    elif confirm_action == "tailscale_exit":
+                    elif confirm_action in ("tailscale_exit", "tailscale_run_exit"):
                         base = panel_confirm(confirm_title, confirm_message, (110, 195, 230), yes_label="Apply")
-                        message = run_with_spinner(base, "Applying exit...", lambda: set_tailscale_exit(ts_pending_ip))
+                        apply_exit = (lambda: set_tailscale_run_exit(ts_pending_run_exit)) if confirm_action == "tailscale_run_exit" else (lambda: set_tailscale_exit(ts_pending_ip))
+                        message = run_with_spinner(base, "Applying exit...", apply_exit)
                         refresher.request("tailscale")
                         show_notice(message or "Could not apply exit node")
                         view = "main"

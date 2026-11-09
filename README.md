@@ -18,6 +18,14 @@
 > policy; choosing None does not unconditionally disable it. Exit-node
 > advertising must be turned off before selecting another exit node.
 >
+> Tap **RUN AS EXIT NODE >** to enable or disable offering this router as an
+> exit node, with confirmation. On/Off reflects the saved GL setting, not
+> tailnet approval or verified forwarding. First choose None in EXIT NODE if
+> using another exit node. After enabling, approve the router as an exit node
+> in Tailscale admin if required. Disabling can interrupt clients using it.
+> This uses GL 4.9+ native `run_exit_node` (tested against GL 4.10.0) and
+> preserves the other GL toggles.
+>
 > Enable Tailscale and sign in through the web admin first. The screen does not
 > log you in or automatically enable Tailscale. OpenClash and other VPN routing
 > should not be active while using a Tailscale custom exit node (see Tailscale
@@ -25,7 +33,7 @@
 >
 > **Validation:** GL-E5800 / GL firmware 4.10.0; real-device rendering and GL
 > read API checked, plus mocked selection/clearing/preservation tests. Live
-> routing changes were not tested because Tailscale was disabled on the device.
+> routing changes and live exit-node advertisement toggling were not tested.
 > Test with `python3 -m unittest discover -s tests -v`.
 >
 > Upstream release IPKs do **not** contain this customization. Install this

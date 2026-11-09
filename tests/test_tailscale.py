@@ -8,13 +8,13 @@ import unittest
 from unittest.mock import Mock
 
 SOURCE = Path(__file__).resolve().parents[1] / 'src/dashboard.py'
-NAMES = {'normalize_tailscale_status', 'get_tailscale_status', 'tailscale_exit_items', 'set_tailscale_exit'}
+NAMES = {'normalize_tailscale_status', 'get_tailscale_status', '_get_tailscale_status', 'set_tailscale_run_exit', 'tailscale_exit_items', 'set_tailscale_exit'}
 
 class TailscaleTests(unittest.TestCase):
     def setUp(self):
         tree = ast.parse(SOURCE.read_text())
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in NAMES]
-        self.env = {'time': time, 'json': json, 'subprocess': Mock()}
+        self.env = {'time': time, 'json': json, 'subprocess': Mock(), 'uci_get': lambda k: '0'}
         self.env['subprocess'].TimeoutExpired = subprocess.TimeoutExpired
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), self.env)
         self.sample = {'BackendState': 'Running', 'Self': {'Online': True, 'HostName': 'Mudi'},
@@ -80,6 +80,37 @@ class TailscaleTests(unittest.TestCase):
         self.cfg.update(enabled=True, run_exit_node=True)
         self.assertEqual(f('100.64.0.11'), 'Disable exit-node advertising first')
         self.assertEqual(self.calls, [])
+
+    def test_run_exit_preserves_other_settings(self):
+        self.setup_apply()
+        def rpc(module, method, params, timeout=8):
+            if method == 'get_config':
+                return True, dict(self.cfg, exit_node_ip=self.saved)
+            self.calls.append(params)
+            self.cfg.update(params)
+            return True, {}
+        self.env['gl_lua_rpc'] = rpc
+        self.env['uci_get'] = lambda k: '1' if self.cfg['run_exit_node'] else '0'
+        f = self.env['set_tailscale_run_exit']
+        self.assertIn('Saved On', f(True))
+        self.assertEqual(self.calls[-1], dict(enabled=True, lan_enabled=True, wan_enabled=False,
+                                             masq=True, run_exit_node=True, exit_node_ip=''))
+        self.assertIn('Saved Off', f(False))
+        self.assertFalse(self.calls[-1]['run_exit_node'])
+
+    def test_run_exit_rejects_conflicts_and_disabled(self):
+        self.setup_apply()
+        f = self.env['set_tailscale_run_exit']
+        self.saved = '100.64.0.11'
+        self.assertIn('Select None', f(True))
+        self.saved = ''
+        self.cfg['enabled'] = False
+        self.assertIn('Enable / sign in', f(True))
+        self.assertEqual(self.calls, [])
+
+    def test_run_exit_failed_save(self):
+        self.setup_apply()
+        self.assertEqual(self.env['set_tailscale_run_exit'](True), 'Setting was not saved')
 
     def test_failed_api_does_not_report_success(self):
         self.setup_apply()
