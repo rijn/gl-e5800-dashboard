@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
-"""Interactive dual-city status dashboard for the GL-E5800's built-in screen.
-
-Four main panels reached by swiping left/right: world clock, currency,
-active SIM, and OpenClash. Tapping into a panel opens a sub-screen (city
-picker, currency picker, data-cap picker, or the OpenClash on/off + mode
-control) -- tap the header to go back, or swipe right. Writes RGB565
-frames directly to /dev/fb0.
-
-Usage:
-  dashboard.py            run the live loop, drawing to /dev/fb0
-  dashboard.py --preview  render every screen to PNG files in the given
-                          directory (plus a contact sheet), for visual QA
-  dashboard.py --calibrate  flash solid red/green/blue full-screen for
-                          1s each, to verify the framebuffer colour
-                          channel order on real hardware
+"""Mudi 7 touchscreen: Home, Active SIM, Monitor, OpenClash, Tailscale.
+Swipe between pages. Tap Tailscale's EXIT NODE card to select an exit node.
+Exit selection uses GL's own configuration handler and requires confirmation.
+Use --preview DIR to render screenshots without changing the live screen.
 """
 import json
 import math
@@ -2823,7 +2812,7 @@ def new_canvas():
     return img, ImageDraw.Draw(img)
 
 
-def draw_page_dots(d, active_idx, count=7):
+def draw_page_dots(d, active_idx, count=5):
     """Dot centres are 16px apart, so the row spans (count - 1) * 16
     between the first and last centre -- centring on that, not on
     count * 16, which put the whole row 8px left of the screen's middle."""
@@ -3176,7 +3165,137 @@ WEATHER_CITY_ZONE = (34, 66)
 
 PICKER_TOP, PICKER_BOTTOM = 38, 316
 
-PANEL_NAMES = ["clock", "sim", "monitor", "weather", "fx", "openclash", "games"]
+PANEL_NAMES = ["clock", "sim", "monitor", "openclash", "tailscale"]
+
+
+
+# Local customization: five-page carousel, Tailscale status and exit-node selection.
+def normalize_tailscale_status(data):
+    if not isinstance(data, dict):
+        raise ValueError("Invalid status")
+    me = data.get("Self") or {}
+    peers = data.get("Peer") or {}
+    peers = peers if isinstance(peers, dict) else {}
+    backend = data.get("BackendState", "Unknown")
+    state = {"NeedsLogin": "Login required", "NeedsMachineAuth": "Approval needed",
+             "Stopped": "Stopped", "Starting": "Starting", "NoState": "Starting"}.get(backend, backend)
+    if backend == "Running":
+        state = "Connected" if me.get("Online") else "Offline"
+    ips = data.get("TailscaleIPs") or me.get("TailscaleIPs") or []
+    ip = next((x for x in ips if ":" not in x), ips[0] if ips else "--")
+    exit_status = data.get("ExitNodeStatus") or {}
+    exit_id = exit_status.get("ID")
+    selected = next((p for p in peers.values() if p.get("ExitNode") or (exit_id and p.get("ID") == exit_id)), None)
+    if selected:
+        exit_name = selected.get("HostName") or (selected.get("DNSName") or "").rstrip(".") or "Selected"
+        exit_name += " / up" if selected.get("Online") else " / down"
+    elif exit_id:
+        exit_name = "Selected / " + ("up" if exit_status.get("Online") else "down")
+    else:
+        exit_name = "None"
+    health = data.get("Health") or []
+    return {"state": state, "node": me.get("HostName") or "--", "ip": ip,
+            "exit": exit_name, "peers": f"{sum(bool(p.get('Online')) for p in peers.values())} / {len(peers)} online",
+            "health": len(health), "updated": time.time(), "backend": backend,
+            "exit_nodes": sorted([{"ip": next((ip for ip in (p.get("TailscaleIPs") or []) if ":" not in ip), ""),
+                "name": p.get("HostName") or (p.get("DNSName") or "").rstrip(".") or "Exit node",
+                "online": bool(p.get("Online"))} for p in peers.values() if p.get("ExitNodeOption")], key=lambda x: (not x["online"], x["name"].lower())),
+            "selected_ip": next((ip.split("/")[0] for ip in (exit_status.get("TailscaleIPs") or (selected or {}).get("TailscaleIPs") or []) if ":" not in ip), "")}
+
+
+def get_tailscale_status():
+    try:
+        result = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=3)
+        if result.stdout.strip():
+            return normalize_tailscale_status(json.loads(result.stdout))
+        state = "Not running" if "failed to connect to local tailscaled" in result.stderr else "Unavailable"
+        return {"state": state, "updated": time.time()}
+    except FileNotFoundError:
+        return {"state": "Not installed", "updated": time.time()}
+    except subprocess.TimeoutExpired:
+        return {"state": "Timed out", "updated": time.time()}
+    except (ValueError, TypeError, OSError, AttributeError):
+        return {"state": "Unavailable", "updated": time.time()}
+
+
+def panel_tailscale(status, conn_type=None, cell_signal=None):
+    img, d = new_canvas()
+    accent = (110, 195, 230)
+    draw_header(d, "TAILSCALE", accent, conn_type, cell_signal)
+    status = status or {"state": "Loading"}
+    age = max(0, int(time.time() - status.get("updated", time.time())))
+    stale = age > 20
+    color = (110, 220, 150) if status["state"] == "Connected" and not stale else (255, 190, 90)
+    d.ellipse([14, 47, 22, 55], fill=color)
+    state = status["state"] + (" (stale)" if stale else "")
+    d.text((30, 41), state, font=font("default_bold", 17), fill=color)
+    rows = [("DEVICE", status.get("node", "--")), ("TAILSCALE IP", status.get("ip", "--")),
+            ("EXIT NODE  >", status.get("exit", "--")), ("PEERS", status.get("peers", "--"))]
+    for index, (label, value) in enumerate(rows):
+        y = 74 + index * 49
+        d.rounded_rectangle([10, y, 230, y + 44], radius=7, fill=(22, 28, 40))
+        d.text((18, y + 4), label, font=font("default_medium", 10), fill=DIM)
+        f = font("default_cn_medium", 14)
+        d.text((18, y + 19), truncate_to_width(d, str(value), f, 204), font=f, fill=FG)
+    note = f"{status.get('health', 0)} health alerts" if status.get("health") else "Tap EXIT NODE to select"
+    centered_text(d, W / 2, 277, note + (f" / {age}s old" if stale else ""), font("default_medium", 10), DIM)
+    draw_page_dots(d, 4)
+    return img
+
+
+
+
+def tailscale_exit_items(status):
+    items = [("", "None (direct connection)")]
+    for node in status.get("exit_nodes", []):
+        if node["ip"]:
+            items.append((node["ip"], node["name"] + ("" if node["online"] else " [offline]")))
+    return items
+
+
+def panel_tailscale_exits(status, scroll_px):
+    img = panel_scroll_picker("Tailscale Exit", (110, 195, 230), tailscale_exit_items(status),
+                              status.get("selected_ip", ""), scroll_px, font_name="default_cn_medium")
+    if len(tailscale_exit_items(status)) == 1:
+        d = ImageDraw.Draw(img)
+        centered_text(d, W / 2, 125, "No exit nodes available", font("default_medium", 13), DIM)
+        centered_text(d, W / 2, 148, "Enable / sign in via web UI", font("default_medium", 12), DIM)
+    return img
+
+
+def set_tailscale_exit(ip):
+    # Use the same config handler as GL's web UI; retain all other toggles.
+    module = "/usr/lib/oui-httpd/rpc/tailscale"
+    ok, cfg = gl_lua_rpc(module, "get_config", {}, timeout=8)
+    if not ok or not isinstance(cfg, dict) or "enabled" not in cfg:
+        return "Cannot read Tailscale settings"
+    if ip:
+        fresh = get_tailscale_status()
+        node = next((n for n in fresh.get("exit_nodes", []) if n["ip"] == ip), None)
+        if not cfg["enabled"] or fresh.get("backend") != "Running":
+            return "Enable / sign in via web UI"
+        if not node or not node["online"]:
+            return "Exit node unavailable"
+        if cfg.get("run_exit_node") or uci_get("ts-fix.settings.advertise_exit_node") == "1":
+            return "Disable exit-node advertising first"
+    params = {k: bool(cfg.get(k)) for k in ("enabled", "lan_enabled", "wan_enabled", "masq", "run_exit_node")}
+    params["exit_node_ip"] = ip
+    if (cfg.get("exit_node_ip") or "") == ip:
+        return "Already selected"
+    ok, result = gl_lua_rpc(module, "set_config", params, timeout=45)
+    if not ok or (isinstance(result, dict) and result.get("err_code")):
+        return "Apply failed; check web settings"
+    if uci_get("tailscale.settings.exit_node_ip") != ip:
+        return "Setting was not saved"
+    if not cfg["enabled"]:
+        return "Exit node cleared"
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        fresh = get_tailscale_status()
+        if fresh.get("backend") == "Running" and fresh.get("selected_ip", "") == ip:
+            return "Exit node selected" if ip else "Exit cleared; kill-switch policy kept"
+        time.sleep(1)
+    return "Saved; reconnecting, check status"
 
 
 # ---------- main panels ----------
@@ -3520,7 +3639,7 @@ def panel_openclash(oc, traf, conn_type=None, cell_signal=None):
     if not oc["installed"]:
         centered_text(d, W / 2, 130, "OpenClash isn't installed", font("default_medium", 14), DIM)
         centered_text(d, W / 2, 150, "on this device", font("default_medium", 14), DIM)
-        draw_page_dots(d, 5)
+        draw_page_dots(d, 3)
         return img
 
     d.text((16, 39), "OpenClash", font=font("default_medium", 16), fill=FG)
@@ -3574,7 +3693,7 @@ def panel_openclash(oc, traf, conn_type=None, cell_signal=None):
     bx0, by0, bx1, by1 = OC_UPDATE_BUTTON
     d.rounded_rectangle([bx0, by0, bx1, by1], radius=(by1 - by0) / 2, outline=ACCENT["openclash"], width=2)
     centered_text_box(d, bx0, by0, bx1, by1, "Update Sub", font("default_medium", 13), ACCENT["openclash"])
-    draw_page_dots(d, 5)
+    draw_page_dots(d, 3)
     return img
 
 
@@ -5457,12 +5576,10 @@ def write_frame(img):
 def mode_preview(outdir):
     os.makedirs(outdir, exist_ok=True)
     cfg = load_config()
-    fx = fetch_fx()
+    fx = {}
     sim = get_sim_status(cfg)
     oc = get_openclash_status()
     traf = get_openclash_traffic_and_node()
-    wx = fetch_weather(cfg["weather_city"])
-    aq = fetch_air_quality(cfg["weather_city"])
     sms_messages = get_sms_messages()
     wg_peers = get_wireguard_peers()
     wg_active = get_wireguard_active()
@@ -5483,31 +5600,26 @@ def mode_preview(outdir):
     conn_type = get_wan_conn_type(_cell_info)
     cell_signal = get_cell_signal(_cell_info)
     cfg_digital = dict(cfg, clock_style="digital")
+    ts = get_tailscale_status()
     screens = [
+        ("tailscale", panel_tailscale(ts, conn_type, cell_signal)),
+        ("tailscale_exits", panel_tailscale_exits(ts, 0)),
         ("clock", panel_clock(cfg, rep, conn_type, cell_signal, sms_messages)),
         ("clock_digital", panel_clock(cfg_digital, rep, conn_type, cell_signal, sms_messages)),
         ("sim", panel_sim(cfg, sim, conn_type, cell_signal, wg_peers, wg_active, _cell_info)),
         ("sim_confirm", panel_confirm("Mobile data", "Turn mobile data off? SMS and calls still work. Internet runs over cellular right now, so the router will go offline.", ACCENT["sim"], yes_label="Turn off", danger=True)),
         ("sim_verifying", draw_loading_overlay(panel_sim(cfg, sim, conn_type, cell_signal, wg_peers, wg_active, _cell_info), "Registering… 7s", 120, ACCENT["sim"])),
-        ("weather", panel_weather(cfg, wx, conn_type, cell_signal)),
         ("monitor", panel_monitor(net_down, net_up, net_iface, cpu_pct, ram_pct, ram_used_gb, ram_total_gb, temp_c, sysinfo["uptime_min"], conn_type, cell_signal)),
         ("speedtest", panel_speedtest(SpeedTest().snapshot())),
         ("speedtest_running", panel_speedtest({"phase": "upload", "live": 38.4, "progress": 0.45, "down": 212.6,
                                                "up": None, "bytes": 171e6, "error": None, "via": conn_type}, 90)),
         ("speedtest_done", panel_speedtest({"phase": "done", "live": 0.0, "progress": 1.0, "down": 212.6,
                                             "up": 41.3, "bytes": 205e6, "error": None, "via": conn_type})),
-        ("fx", panel_fx(cfg, fx, "month", conn_type, cell_signal)),
         ("openclash", panel_openclash(oc, traf, conn_type, cell_signal)),
         ("city_top", panel_city_picker("top", cfg)),
         ("city_bottom", panel_city_picker("bottom", cfg)),
-        ("fx_top_from", panel_currency_picker("top", "from", cfg)),
-        ("fx_top_to", panel_currency_picker("top", "to", cfg)),
-        ("fx_bottom_from", panel_currency_picker("bottom", "from", cfg)),
-        ("fx_bottom_to", panel_currency_picker("bottom", "to", cfg)),
         ("datacap", panel_datacap_picker(cfg)),
         ("oc_nodes", panel_node_picker(traf)),
-        ("weather_city", panel_weather_picker(cfg)),
-        ("weather_detail", panel_weather_detail(cfg, wx[0], aq[0] if aq else None, weather_day_labels(wx)[0]) if wx else new_canvas()[0]),
         ("sms", panel_sms(sms_messages or _DEMO_SMS_MESSAGES)),
         ("sms_detail", panel_sms_detail((sms_messages or _DEMO_SMS_MESSAGES)[0])),
         ("wireguard", panel_wireguard(wg_peers, wg_active)),
@@ -5516,11 +5628,6 @@ def mode_preview(outdir):
         ("confirm", panel_confirm("Reboot", "Reboot the router now?", ACCENT["clock"], yes_label="Reboot", danger=True)),
         ("confirm_long", panel_confirm("Stock UI", "Hand the screen back to the GL.iNet UI?", ACCENT["clock"], yes_label="Switch")),
         ("keyboard", panel_keyboard("Wi-Fi Password", "myPass", "letters", True, ACCENT["clock"])),
-        ("games_hub", panel_games(load_game_scores())),
-        ("game_snake", draw_snake(new_snake_state(), load_game_scores())),
-        ("game_flappy", draw_flappy(new_flappy_state(), load_game_scores())),
-        ("game_breakout", draw_breakout(new_breakout_state(), load_game_scores())),
-        ("game_2048", draw_2048(new_2048_state(), load_game_scores())),
     ]
     cols, pad = 5, 10
     rows = (len(screens) + cols - 1) // cols
@@ -5753,14 +5860,12 @@ def mode_live():
     # already-fetched values, so a slow curl or a wedged ubus call can no
     # longer stall drawing or touch handling.
     refresher = Refresher()
-    refresher.add("fx", fetch_fx, 300)
+    refresher.add("tailscale", get_tailscale_status, 5)
     refresher.add("sim", lambda: get_sim_status(cfg), 30)
     # 10s: the toggle now shows whether the core is actually running, and
     # OpenClash also gets started/stopped from LuCI or the GL app.
     refresher.add("oc", get_openclash_status, 10)
     refresher.add("traf", get_openclash_traffic_and_node, 20)
-    refresher.add("wx", lambda: fetch_weather(cfg["weather_city"]), 1800)
-    refresher.add("aq", lambda: fetch_air_quality(cfg["weather_city"]), 1800)
     refresher.add("sms", get_sms_messages, 15)
     refresher.add("rep", get_repeater_status, 30)
     refresher.add("wg_peers", get_wireguard_peers, 120)
@@ -5784,7 +5889,7 @@ def mode_live():
 
     # Seeded from cache/defaults so the first frame draws immediately
     # instead of waiting on the first refresher pass.
-    fx = fetch_fx()
+    fx = {}
     sim = {"slot": "1", "country": None, "phone": "", "traffic_mb": None,
            "cap_mb": cfg.get("data_cap_mb"), "sim_choice": "sim1", "data_up": False,
            "iccid": None, "attached": False, "roaming": False, "carrier": None, "airplane": False}
@@ -5841,6 +5946,8 @@ def mode_live():
             return panel_sim(cfg, sim, conn_type, cell_signal, wg_peers, wg_active, cell_info)
         elif name == "openclash":
             return panel_openclash(oc, traf, conn_type, cell_signal)
+        elif name == "tailscale":
+            return panel_tailscale(refresher.get("tailscale"), conn_type, cell_signal)
         elif name == "weather":
             return panel_weather(cfg, wx, conn_type, cell_signal)
         elif name == "games":
@@ -6036,7 +6143,9 @@ def mode_live():
                     # Hand the picker frame to on_select so a slow apply can
                     # dim *this* screen and spin over it, instead of freezing
                     # on it with no sign of life.
-                    on_select(items[idx][0], render_fn(picker_scroll_base))
+                    if on_select(items[idx][0], render_fn(picker_scroll_base)):
+                        sub_dirty = True
+                        return
                     view = "main"
                     cur_img = render_main(panel_idx)
                     write_frame(cur_img)
@@ -6338,6 +6447,8 @@ def mode_live():
     kb_layer = "letters"
     kb_caps = False
     kb_target_ssid = kb_target_bssid = None
+    ts_picker_status = {}
+    ts_pending_ip = ""
     picker_scroll_base = 0.0
     fx_edit_side = "from"
     last_switch_req_check = 0.0
@@ -6597,7 +6708,12 @@ def mode_live():
                             zone = hit_main_monitor(down_x, down_y)
 
                         new_view = None
-                        if name == "clock" and zone == "city_left":
+                        if name == "tailscale" and 172 <= down_y <= 216:
+                            ts_picker_status = run_with_spinner(cur_img, "Loading nodes...", get_tailscale_status) or {}
+                            ts_picker_status["selected_ip"] = uci_get("tailscale.settings.exit_node_ip")
+                            picker_scroll_base = 0
+                            new_view = "ts_exits"
+                        elif name == "clock" and zone == "city_left":
                             new_view = "city_top"
                             picker_scroll_base = 0
                         elif name == "clock" and zone == "city_right":
@@ -6774,6 +6890,28 @@ def mode_live():
                         last_dx_drawn = dx_now
 
         else:  # sub-screen
+            if view == "ts_exits":
+                def _choose_ts_exit(key, base_img):
+                    nonlocal ts_pending_ip, confirm_title, confirm_message, confirm_yes_label
+                    nonlocal confirm_action, confirm_return_view, confirm_danger, view
+                    node = next((n for n in ts_picker_status.get("exit_nodes", []) if n["ip"] == key), None)
+                    if key and (not node or not node["online"]):
+                        show_notice("Exit node is offline")
+                        return False
+                    ts_pending_ip = key
+                    confirm_title = "Tailscale Exit"
+                    confirm_message = ("Route internet via " + node["name"] + "? Connection may restart.") if key else "Stop using the exit node? Kill switch stays as configured."
+                    confirm_yes_label = "Apply"
+                    confirm_action = "tailscale_exit"
+                    confirm_return_view = "ts_exits"
+                    confirm_danger = False
+                    view = "confirm"
+                    return True
+                handle_scroll_picker(now, tailscale_exit_items(ts_picker_status),
+                                     lambda scroll: panel_tailscale_exits(ts_picker_status, scroll), _choose_ts_exit)
+                time.sleep(0.012)
+                continue
+
             if view == "datacap":
                 def _select_datacap(key, base_img):
                     nonlocal sim
@@ -6931,6 +7069,15 @@ def mode_live():
                         message = apply_fn(confirm_action)
                         if message:
                             show_notice(message)
+                        view = "main"
+                        cur_img = render_main(panel_idx)
+                        write_frame(cur_img)
+                        last_draw = time.time()
+                    elif confirm_action == "tailscale_exit":
+                        base = panel_confirm(confirm_title, confirm_message, (110, 195, 230), yes_label="Apply")
+                        message = run_with_spinner(base, "Applying exit...", lambda: set_tailscale_exit(ts_pending_ip))
+                        refresher.request("tailscale")
+                        show_notice(message or "Could not apply exit node")
                         view = "main"
                         cur_img = render_main(panel_idx)
                         write_frame(cur_img)

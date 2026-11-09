@@ -1,3 +1,40 @@
+> **rijn fork — custom five-page layout**
+>
+> Main pages: **Home → Active SIM → Monitor → OpenClash → Tailscale**.
+> Weather, currency and games are hidden from the carousel; their periodic
+> weather/currency requests are disabled. Home's settings, SMS and repeater
+> controls remain available. The upstream feature reference follows below.
+>
+> **Tailscale:** shows backend/online state, device name, Tailscale IP, selected
+> exit node and online peer count. Status is refreshed in the background on a
+> nominal five-second interval; stale readings are marked. This is daemon status,
+> not an end-to-end internet connectivity test.
+>
+> Tap **EXIT NODE >** to open the scrollable node picker. It lists advertised
+> exit nodes, marks offline entries, and includes **None (direct connection)**.
+> Selection requires confirmation, rechecks availability, preserves GL's other
+> Tailscale toggles, and calls GL's own `tailscale.set_config` handler. Applying
+> can restart Tailscale. Kill Switch remains governed by Tailscale Fix's existing
+> policy; choosing None does not unconditionally disable it. Exit-node
+> advertising must be turned off before selecting another exit node.
+>
+> Enable Tailscale and sign in through the web admin first. The screen does not
+> log you in or automatically enable Tailscale. OpenClash and other VPN routing
+> should not be active while using a Tailscale custom exit node (see Tailscale
+> Fix's compatibility guidance).
+>
+> **Validation:** GL-E5800 / GL firmware 4.10.0; real-device rendering and GL
+> read API checked, plus mocked selection/clearing/preservation tests. Live
+> routing changes were not tested because Tailscale was disabled on the device.
+> Test with `python3 -m unittest discover -s tests -v`.
+>
+> Upstream release IPKs do **not** contain this customization. Install this
+> fork's source (`./install.sh ROUTER_IP`) or build its package with
+> `cd packages && ./build.sh`. Replacing it with an upstream update removes
+> these changes. The stock-UI switch remains available.
+
+![Exit-node menu (demo)](screenshots/panel_tailscale_exits_demo.png)
+
 # GL-E5800 Touch Dashboard
 
 A custom, fully interactive replacement for the stock `gl_screen` UI on the
