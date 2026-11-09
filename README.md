@@ -11,7 +11,8 @@
 > not an end-to-end internet connectivity test.
 >
 > Tap **EXIT NODE >** to open the scrollable node picker. It lists advertised
-> exit nodes, marks offline entries, and includes **None (direct connection)**.
+> exit nodes using their Tailscale DNS names (hostname fallback), shows their
+> IP addresses underneath, marks offline entries, and includes **None (direct connection)**.
 > Selection requires confirmation, rechecks availability, preserves GL's other
 > Tailscale toggles, and calls GL's own `tailscale.set_config` handler. Applying
 > can restart Tailscale. Kill Switch remains governed by Tailscale Fix's existing

@@ -3187,7 +3187,7 @@ def normalize_tailscale_status(data):
     exit_id = exit_status.get("ID")
     selected = next((p for p in peers.values() if p.get("ExitNode") or (exit_id and p.get("ID") == exit_id)), None)
     if selected:
-        exit_name = selected.get("HostName") or (selected.get("DNSName") or "").rstrip(".") or "Selected"
+        exit_name = (selected.get("DNSName") or "").split(".")[0] or selected.get("HostName") or "Selected"
         exit_name += " / up" if selected.get("Online") else " / down"
     elif exit_id:
         exit_name = "Selected / " + ("up" if exit_status.get("Online") else "down")
@@ -3198,7 +3198,7 @@ def normalize_tailscale_status(data):
             "exit": exit_name, "peers": f"{sum(bool(p.get('Online')) for p in peers.values())} / {len(peers)} online",
             "health": len(health), "updated": time.time(), "backend": backend,
             "exit_nodes": sorted([{"ip": next((ip for ip in (p.get("TailscaleIPs") or []) if ":" not in ip), ""),
-                "name": p.get("HostName") or (p.get("DNSName") or "").rstrip(".") or "Exit node",
+                "name": (p.get("DNSName") or "").split(".")[0] or p.get("HostName") or "Exit node",
                 "online": bool(p.get("Online"))} for p in peers.values() if p.get("ExitNodeOption")], key=lambda x: (not x["online"], x["name"].lower())),
             "selected_ip": next((ip.split("/")[0] for ip in (exit_status.get("TailscaleIPs") or (selected or {}).get("TailscaleIPs") or []) if ":" not in ip), "")}
 
@@ -3286,7 +3286,8 @@ def tailscale_exit_items(status):
 
 def panel_tailscale_exits(status, scroll_px):
     img = panel_scroll_picker("Tailscale Exit", (110, 195, 230), tailscale_exit_items(status),
-                              status.get("selected_ip", ""), scroll_px, font_name="default_cn_medium")
+                              status.get("selected_ip", ""), scroll_px, font_name="default_cn_medium",
+                              subtitles={n["ip"]: n["ip"] for n in status.get("exit_nodes", [])})
     if len(tailscale_exit_items(status)) == 1:
         d = ImageDraw.Draw(img)
         centered_text(d, W / 2, 125, "No exit nodes available", font("default_medium", 13), DIM)
@@ -5344,7 +5345,7 @@ SCROLL_ROW_H = 32
 SCROLL_FONT_SIZE = 15
 
 
-def panel_scroll_picker(title, accent, items, selected, scroll_px, font_name="default_medium"):
+def panel_scroll_picker(title, accent, items, selected, scroll_px, font_name="default_medium", subtitles=None):
     """Like panel_picker but with a fixed, larger row height and a vertical
     scroll offset -- for lists too long to shrink-to-fit on one screen.
     `font_name` lets callers with non-Latin content (e.g. Chinese-named
@@ -5366,11 +5367,16 @@ def panel_scroll_picker(title, accent, items, selected, scroll_px, font_name="de
         sel = key == selected
         if sel:
             ld.rectangle([0, y0, W, y0 + SCROLL_ROW_H], fill=(28, 40, 56))
-        label = truncate_to_width(ld, label, f, max_label_w)
-        bbox = ld.textbbox((0, 0), label, font=f)
+        subtitle = (subtitles or {}).get(key)
+        label_font = font(font_name, 12) if subtitle else f
+        label = truncate_to_width(ld, label, label_font, max_label_w)
+        bbox = ld.textbbox((0, 0), label, font=label_font)
         th = bbox[3] - bbox[1]
         color = accent if sel else FG
-        ld.text((20, y0 + (SCROLL_ROW_H - th) / 2 - bbox[1]), label, font=f, fill=color)
+        label_y = y0 + 2 - bbox[1] if subtitle else y0 + (SCROLL_ROW_H - th) / 2 - bbox[1]
+        ld.text((20, label_y), label, font=label_font, fill=color)
+        if subtitle:
+            ld.text((20, y0 + 17), subtitle, font=font("default_medium", 10), fill=DIM)
         if sel:
             cbbox = ld.textbbox((0, 0), "✓", font=check_f)
             cth = cbbox[3] - cbbox[1]

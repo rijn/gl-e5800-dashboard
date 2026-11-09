@@ -33,6 +33,14 @@ class TailscaleTests(unittest.TestCase):
         items = self.env['tailscale_exit_items'](result)
         self.assertEqual(items, [('', 'None (direct connection)'), ('100.64.0.11', 'Home'), ('100.64.0.12', 'Office [offline]')])
 
+    def test_exit_name_prefers_tailnet_dns_over_localhost(self):
+        peer = self.sample['Peer']['a']
+        peer.update(HostName='localhost', DNSName='shanghai-ecs-example.tailnet.ts.net.')
+        result = self.env['normalize_tailscale_status'](self.sample)
+        self.assertEqual(result['exit_nodes'][0]['name'], 'shanghai-ecs-example')
+        self.assertEqual(result['exit_nodes'][0]['ip'], '100.64.0.11')
+        self.assertEqual(result['exit'], 'shanghai-ecs-example / up')
+
     def test_disconnected_states(self):
         f = self.env['normalize_tailscale_status']
         self.assertEqual(f({'BackendState':'NeedsLogin'})['state'], 'Login required')
